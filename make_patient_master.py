@@ -3,8 +3,8 @@ import re
 from pathlib import Path
 
 # ========= config =========
-# 先调试 smoking 清理时，建议先设成 False
-# 等你电脑空间够了、环境稳定了，再改成 True 跑 encounters
+# 先只跑 patients 清理时设成 False
+# 需要跑 encounters 聚合时再改成 True
 INCLUDE_ENCOUNTERS = False
 
 # ========= helper functions =========
@@ -43,27 +43,50 @@ def clean_status_for_flag(series):
 def clean_smoking_group(series):
     s = clean_missing(series).astype(str).str.strip()
 
-    mapping = {
-        "Never": "Never",
-        "Former": "Former",
-        "Every Day": "Current Smoker",
-        "Some Days": "Current Smoker",
-        "Heavy Smoker": "Current Smoker",
-        "Light Smoker": "Current Smoker",
-        "Smoker, Current Status Unknown": "Current Smoker",
-        "Passive Smoke Exposure - Never Smoker": "Passive / Not Assessed",
-        "Never Assessed": "Passive / Not Assessed",
-        "Missing": "Missing",
-    }
+    def recode(x):
+        xl = str(x).strip().lower()
 
-    return s.map(lambda x: mapping.get(x, "Other"))
+        if xl == "never":
+            return "Never"
+
+        if xl == "former":
+            return "Former"
+
+        if (
+            "every day" in xl
+            or "some days" in xl
+            or "heavy smoker" in xl
+            or "light smoker" in xl
+            or (
+                "smoker" in xl
+                and "never smoker" not in xl
+                and "former" not in xl
+                and "passive" not in xl
+            )
+        ):
+            return "Current"
+
+        if (
+            "passive" in xl
+            or "never assessed" in xl
+            or "unknown" in xl
+            or "not applicable" in xl
+            or "unspecified" in xl
+            or "missing" in xl
+            or "never smoker" in xl
+        ):
+            return "Passive / Not Assessed"
+
+        return "Passive / Not Assessed"
+
+    return s.map(recode)
 
 # ========= file paths =========
 base = Path(".")
 patients_file = base / "patients.csv"
 encounters_file = base / "encounters.csv"
 
-# ========= read patients header first =========
+# ========= read patients header =========
 print("Reading patients.csv header ...")
 patient_header = pd.read_csv(patients_file, nrows=0)
 patient_cols_all = list(patient_header.columns)
@@ -101,6 +124,7 @@ patient_usecols = [c for c in [
     omb_race_col, omb_eth_col, first_race_col, sex_col
 ] if c is not None]
 
+# ========= read patients data =========
 print("\nReading patients.csv data ...")
 patients = pd.read_csv(
     patients_file,
@@ -122,11 +146,12 @@ else:
     patients_clean["birth_year_bin"] = "Missing"
 
 if smoking_col:
-    patients_clean["smoking_status"] = clean_missing(patients[smoking_col])
-    patients_clean["smoking_group"] = clean_smoking_group(patients[smoking_col])
+    cleaned_smoking = clean_smoking_group(patients[smoking_col])
+    patients_clean["smoking_status"] = cleaned_smoking
+    patients_clean["smoking_group"] = cleaned_smoking
 else:
-    patients_clean["smoking_status"] = "Missing"
-    patients_clean["smoking_group"] = "Missing"
+    patients_clean["smoking_status"] = "Passive / Not Assessed"
+    patients_clean["smoking_group"] = "Passive / Not Assessed"
 
 if omb_race_col:
     patients_clean["omb_race"] = clean_missing(patients[omb_race_col])
@@ -157,6 +182,9 @@ after = len(patients_clean)
 
 print(f"\nDropped duplicate patient_id rows: {before - after}")
 print("patients_clean shape:", patients_clean.shape)
+
+print("\nSmoking categories after cleaning:")
+print(sorted(patients_clean["smoking_group"].dropna().unique().tolist()))
 
 # ========= optional encounter summary =========
 if INCLUDE_ENCOUNTERS and encounters_file.exists():
@@ -268,17 +296,6 @@ summary_smoking = (
 )
 summary_smoking.to_csv("summary_smoking.csv", index=False)
 
-summary_smoking_raw = (
-    patient_master.groupby("smoking_status", dropna=False)
-    .agg(
-        n=("patient_id", "count"),
-        activation_rate=("activated_flag", "mean")
-    )
-    .reset_index()
-    .sort_values("activation_rate", ascending=False)
-)
-summary_smoking_raw.to_csv("summary_smoking_raw.csv", index=False)
-
 print("\nDone.")
 print("Created files:")
 print("- patients_clean.csv")
@@ -286,4 +303,3 @@ print("- patient_master.csv")
 print("- summary_age.csv")
 print("- summary_race.csv")
 print("- summary_smoking.csv")
-print("- summary_smoking_raw.csv")
